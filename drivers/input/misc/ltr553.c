@@ -883,7 +883,7 @@ static int ltr553_process_data(struct ltr553_data *ltr, int als_ps)
 	int i;
 	int distance;
 
-	timestamp = ktime_get();
+	timestamp = ktime_get_boottime();
 
 	if (als_ps) { /* process als data */
 		/* Read data */
@@ -1041,12 +1041,14 @@ static void ltr553_report_work(struct work_struct *work)
 	int rc;
 	unsigned int status;
 	u8 buf[7];
+	int fake_interrupt = 0;
 
 	mutex_lock(&ltr->ops_lock);
 
 	/* avoid fake interrupt */
 	if (!ltr->power_enabled) {
 		dev_dbg(&ltr->i2c->dev, "fake interrupt triggered\n");
+		fake_interrupt = 1;
 		goto exit;
 	}
 
@@ -1084,9 +1086,11 @@ exit:
 	}
 
 	/* clear interrupt */
-	if (regmap_bulk_read(ltr->regmap, LTR553_REG_ALS_DATA_CH1_0,
-			buf, ARRAY_SIZE(buf)))
-		dev_err(&ltr->i2c->dev, "clear interrupt failed\n");
+	if (!fake_interrupt) {
+		if (regmap_bulk_read(ltr->regmap, LTR553_REG_ALS_DATA_CH1_0,
+					buf, ARRAY_SIZE(buf)))
+			dev_err(&ltr->i2c->dev, "clear interrupt failed\n");
+	}
 
 	mutex_unlock(&ltr->ops_lock);
 }
@@ -1989,7 +1993,7 @@ static int ltr553_probe(struct i2c_client *client,
 	ltr->als_cdev.sensors_enable = ltr553_cdev_enable_als;
 	ltr->als_cdev.sensors_poll_delay = ltr553_cdev_set_als_delay;
 	ltr->als_cdev.sensors_flush = ltr553_cdev_als_flush;
-	res = sensors_classdev_register(&client->dev, &ltr->als_cdev);
+	res = sensors_classdev_register(&ltr->input_light->dev, &ltr->als_cdev);
 	if (res) {
 		dev_err(&client->dev, "sensors class register failed.\n");
 		goto err_register_als_cdev;
@@ -2002,7 +2006,8 @@ static int ltr553_probe(struct i2c_client *client,
 	ltr->ps_cdev.sensors_calibrate = ltr553_cdev_ps_calibrate;
 	ltr->ps_cdev.sensors_write_cal_params = ltr553_cdev_ps_write_cal;
 	ltr->ps_cdev.params = ltr->calibrate_buf;
-	res = sensors_classdev_register(&client->dev, &ltr->ps_cdev);
+	res = sensors_classdev_register(&ltr->input_proximity->dev,
+			&ltr->ps_cdev);
 	if (res) {
 		dev_err(&client->dev, "sensors class register failed.\n");
 		goto err_register_ps_cdev;

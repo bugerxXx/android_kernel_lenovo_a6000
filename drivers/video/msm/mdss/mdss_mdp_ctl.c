@@ -2470,11 +2470,12 @@ int mdss_mdp_ctl_stop(struct mdss_mdp_ctl *ctl, int power_state)
 		mdss_mdp_ctl_write(ctl, off, 0);
 	}
 
-	ctl->power_state = power_state;
 	ctl->play_cnt = 0;
 	mdss_mdp_ctl_perf_update(ctl, 0);
 
 end:
+	if (!ret)
+		ctl->power_state = power_state;
 	mdss_mdp_clk_ctrl(MDP_BLOCK_POWER_OFF);
 
 	mutex_unlock(&ctl->lock);
@@ -3453,7 +3454,8 @@ int mdss_mdp_get_ctl_mixers(u32 fb_num, u32 *mixer_id)
 	mdata = mdss_mdp_get_mdata();
 	for (i = 0; i < mdata->nctl; i++) {
 		ctl = mdata->ctl_off + i;
-		if ((ctl->mfd) && (ctl->mfd->index == fb_num)) {
+		if ((mdss_mdp_ctl_is_power_on(ctl) || mdata->handoff_pending) &&
+				(ctl->mfd) && (ctl->mfd->index == fb_num)) {
 			if (ctl->mixer_left) {
 				mixer_id[mixer_cnt] = ctl->mixer_left->num;
 				mixer_cnt++;

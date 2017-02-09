@@ -328,7 +328,6 @@ struct qpnp_lbc_chip {
 	bool				fastchg_on;
 	bool				cfg_use_external_charger;
 	bool				cfg_chgr_led_support;
-	bool				cfg_bms_controlled_charging;
 	unsigned int			cfg_warm_bat_chg_ma;
 	unsigned int			cfg_cool_bat_chg_ma;
 	unsigned int			cfg_safe_voltage_mv;
@@ -1410,9 +1409,8 @@ static int get_prop_current_now(struct qpnp_lbc_chip *chip)
 static int get_prop_capacity(struct qpnp_lbc_chip *chip)
 {
 	union power_supply_propval ret = {0,};
-	int soc, battery_status, charger_in;
-	int current_now, voltage_now, charge_type;
-	
+	int soc;
+
 	if (chip->fake_battery_soc >= 0)
 		return chip->fake_battery_soc;
 
@@ -1422,57 +1420,6 @@ static int get_prop_capacity(struct qpnp_lbc_chip *chip)
 	if (chip->bms_psy) {
 		chip->bms_psy->get_property(chip->bms_psy,
 				POWER_SUPPLY_PROP_CAPACITY, &ret);
-		mutex_lock(&chip->chg_enable_lock);
-		if (chip->chg_done)
-			chip->bms_psy->get_property(chip->bms_psy,
-					POWER_SUPPLY_PROP_CAPACITY, &ret);
-		battery_status = get_prop_batt_status(chip);
-		charger_in = qpnp_lbc_is_usb_chg_plugged_in(chip);
-
-		//printk(KERN_WARNING  "~capacity=%d chg_done=%d batt_status=%d \n",ret.intval,chip->chg_done,battery_status); //add by maxwill
-
-		/* reset chg_done flag if capacity not 100% */
-		if (ret.intval < 100 && chip->chg_done) {
-			chip->chg_done = false;
-			power_supply_changed(&chip->batt_psy);
-		}
-
-		if (battery_status != POWER_SUPPLY_STATUS_CHARGING
-				&& charger_in
-				&& !chip->cfg_charging_disabled
-				&& chip->cfg_soc_resume_limit
-				&& ret.intval <= chip->cfg_soc_resume_limit
-				&& !chip->cfg_bms_controlled_charging) {
-			pr_debug("resuming charging at %d%% soc\n",
-					ret.intval);
-			if (!chip->cfg_disable_vbatdet_based_recharge)
-				qpnp_lbc_vbatdet_override(chip, OVERRIDE_0);
-			
-			//printk(KERN_WARNING  "~SOC_TurnOn CHGR \n"); //add by maxwill
-			qpnp_lbc_charger_enable(chip, SOC, 1);
-		}
-		// +bug290025 xuecheng.wt modify for yizhi99% 20140925	
-#if 1
-		charge_type = get_prop_charge_type(chip);
-		voltage_now = get_prop_battery_voltage_now(chip);
-		current_now = get_prop_current_now(chip);
-				if (battery_status == POWER_SUPPLY_STATUS_FULL 
-			&& charge_type == POWER_SUPPLY_CHARGE_TYPE_FAST
-			&& charger_in 
-			&& ret.intval == 100 
-			&& current_now > -90000 
-			&& voltage_now > 4340000) 
-		{
-			pr_info("qpnp-linear :disable charger ! ---------------------------\n");
-			if(chip->chg_done == false)
-				chip->chg_done = true;
-			qpnp_lbc_charger_enable(chip, SOC, 0);
-		}
-
-#endif
-		//-bug290025 xuecheng.wt modify for yizhi99% 20140925	
-		mutex_unlock(&chip->chg_enable_lock);
-
 		soc = ret.intval;
 
               //+NewFeature,mahao.wt,ADD,2015.3.16,add Fan54015 driver
@@ -1753,10 +1700,10 @@ static int qpnp_batt_power_set_property(struct power_supply *psy,
 	switch (psp) {         
 	case POWER_SUPPLY_PROP_STATUS:
 		mutex_lock(&chip->chg_enable_lock);
-
-		if (val->intval == POWER_SUPPLY_STATUS_FULL &&
-				!chip->cfg_float_charge) {
-
+		switch (val->intval) {
+		case POWER_SUPPLY_STATUS_FULL:
+			if (chip->cfg_float_charge)
+				break;
 			/* Disable charging */
 			rc = qpnp_lbc_charger_enable(chip, SOC, 0);
 			if (rc)
@@ -1781,29 +1728,23 @@ static int qpnp_batt_power_set_property(struct power_supply *psy,
 					qpnp_lbc_enable_irq(chip,
 						&chip->irqs[CHG_VBAT_DET_LO]);
 			}
+			break;
+		case POWER_SUPPLY_STATUS_CHARGING:
+			chip->chg_done = false;
+			pr_debug("resuming charging by bms\n");
+			if (!chip->cfg_disable_vbatdet_based_recharge)
+				qpnp_lbc_vbatdet_override(chip, OVERRIDE_0);
 
+			qpnp_lbc_charger_enable(chip, SOC, 1);
+			break;
+		case POWER_SUPPLY_STATUS_DISCHARGING:
+			chip->chg_done = false;
+			pr_debug("status = DISCHARGING chg_done = %d\n",
+					chip->chg_done);
+			break;
+		default:
+			break;
 		}
-
-		if (chip->cfg_bms_controlled_charging) {
-			switch (val->intval) {
-			case POWER_SUPPLY_STATUS_CHARGING:
-				chip->chg_done = false;
-				pr_debug("resuming charging by bms\n");
-				if (!chip->cfg_disable_vbatdet_based_recharge)
-					qpnp_lbc_vbatdet_override(chip,
-								OVERRIDE_0);
-				qpnp_lbc_charger_enable(chip, SOC, 1);
-				break;
-			case POWER_SUPPLY_STATUS_DISCHARGING:
-				chip->chg_done = false;
-				pr_debug("status = DISCHARGING chg_done = %d\n",
-						chip->chg_done);
-				break;
-			default:
-				break;
-			}
-		}
-
 		mutex_unlock(&chip->chg_enable_lock);
 		break;
 	case POWER_SUPPLY_PROP_COOL_TEMP:
@@ -2370,7 +2311,6 @@ static int show_lbc_config(struct seq_file *m, void *data)
 			"cfg_use_fake_battery\t=\t%d\n"
 			"cfg_use_external_charger\t=\t%d\n"
 			"cfg_chgr_led_support\t=\t%d\n"
-			"cfg_bms_controlled_charging\t=\t%d\n"
 			"cfg_warm_bat_chg_ma\t=\t%d\n"
 			"cfg_cool_bat_chg_ma\t=\t%d\n"
 			"cfg_safe_voltage_mv\t=\t%d\n"
@@ -2396,7 +2336,6 @@ static int show_lbc_config(struct seq_file *m, void *data)
 			chip->cfg_use_fake_battery,
 			chip->cfg_use_external_charger,
 			chip->cfg_chgr_led_support,
-			chip->cfg_bms_controlled_charging,
 			chip->cfg_warm_bat_chg_ma,
 			chip->cfg_cool_bat_chg_ma,
 			chip->cfg_safe_voltage_mv,
@@ -2549,10 +2488,6 @@ static int qpnp_charger_read_dt_props(struct qpnp_lbc_chip *chip)
 			of_property_read_bool(chip->spmi->dev.of_node,
 					"qcom,chgr-led-support");
 
-	chip->cfg_bms_controlled_charging =
-			of_property_read_bool(chip->spmi->dev.of_node,
-					"qcom,bms-controlled-charging");
-
 	/* Disable charging when faking battery values */
 	if (chip->cfg_use_fake_battery)
 		chip->cfg_charging_disabled = true;
@@ -2608,11 +2543,10 @@ static int qpnp_charger_read_dt_props(struct qpnp_lbc_chip *chip)
 			chip->cfg_charging_disabled,
 			chip->cfg_use_fake_battery,
 			chip->cfg_float_charge);
-	pr_debug("charger-detect-eoc=%d, disable-vbatdet-based-recharge=%d, chgr-led-support=%d, bms-controlled-charging=%d\n",
+	pr_debug("charger-detect-eoc=%d, disable-vbatdet-based-recharge=%d, chgr-led-support=%d\n",
 			chip->cfg_charger_detect_eoc,
 			chip->cfg_disable_vbatdet_based_recharge,
-			chip->cfg_chgr_led_support,
-			chip->cfg_bms_controlled_charging);
+			chip->cfg_chgr_led_support);
 	pr_debug("use-external-charger=%d, thermal_levels=%d\n",
 			chip->cfg_use_external_charger,
 			chip->cfg_thermal_levels);

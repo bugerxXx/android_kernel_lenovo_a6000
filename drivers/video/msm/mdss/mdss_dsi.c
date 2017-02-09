@@ -219,9 +219,9 @@ error:
 	return ret;
 }
 
-static int mdss_dsi_panel_power_doze(struct mdss_panel_data *pdata, int enable)
+static int mdss_dsi_panel_power_lp(struct mdss_panel_data *pdata, int enable)
 {
-	/* Panel power control when entering/exiting doze mode */
+	/* Panel power control when entering/exiting lp mode */
 	return 0;
 }
 
@@ -258,12 +258,13 @@ static int mdss_dsi_panel_power_ctrl(struct mdss_panel_data *pdata,
 		break;
 	case MDSS_PANEL_POWER_ON:
 		if (mdss_dsi_is_panel_on_lp(pdata))
-			ret = mdss_dsi_panel_power_doze(pdata, false);
+			ret = mdss_dsi_panel_power_lp(pdata, false);
 		else
 			ret = mdss_dsi_panel_power_on(pdata);
 		break;
-	case MDSS_PANEL_POWER_DOZE:
-		ret = mdss_dsi_panel_power_doze(pdata, true);
+	case MDSS_PANEL_POWER_LP1:
+	case MDSS_PANEL_POWER_LP2:
+		ret = mdss_dsi_panel_power_lp(pdata, true);
 		break;
 	default:
 		pr_err("%s: unknown panel power state requested (%d)\n",
@@ -508,7 +509,7 @@ static int mdss_dsi_off(struct mdss_panel_data *pdata, int power_state)
 		goto end;
 	}
 
-	if (power_state != MDSS_PANEL_POWER_OFF) {
+	if (mdss_panel_is_power_on(power_state)) {
 		pr_debug("%s: dsi_off with panel always on\n", __func__);
 		goto panel_power_ctrl;
 	}
@@ -782,7 +783,7 @@ static int mdss_dsi_blank(struct mdss_panel_data *pdata, int power_state)
 
 	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 1);
 
-	if (power_state == MDSS_PANEL_POWER_DOZE) {
+	if (mdss_panel_is_power_on_lp(power_state)) {
 		pr_debug("%s: low power state requested\n", __func__);
 		if (ctrl_pdata->low_power_config)
 			ret = ctrl_pdata->low_power_config(pdata, true);
@@ -1296,11 +1297,11 @@ static int mdss_dsi_event_handler(struct mdss_panel_data *pdata,
 		break;
 	case MDSS_EVENT_PANEL_OFF:
 		power_state = (int) (unsigned long) arg;
-		pdata->panel_info.esd_rdy = false;
 		ctrl_pdata->ctrl_state &= ~CTRL_STATE_MDP_ACTIVE;
 		if (ctrl_pdata->off_cmds.link_state == DSI_LP_MODE)
 			rc = mdss_dsi_blank(pdata, power_state);
-		rc = mdss_dsi_off(pdata, power_state);
+		if (!(pdata->panel_info.mipi.always_on))
+			rc = mdss_dsi_off(pdata, power_state);
 		break;
 	case MDSS_EVENT_CONT_SPLASH_FINISH:
 		if (ctrl_pdata->off_cmds.link_state == DSI_LP_MODE)
@@ -1580,6 +1581,10 @@ static int mdss_dsi_ctrl_probe(struct platform_device *pdev)
 		pr_err("%s: dsi panel dev reg failed\n", __func__);
 		goto error_pan_node;
 	}
+
+	ctrl_pdata->cmd_clk_ln_recovery_en =
+		of_property_read_bool(pdev->dev.of_node,
+			"qcom,dsi-clk-ln-recovery");
 
 	if (mdss_dsi_is_te_based_esd(ctrl_pdata)) {
 		rc = devm_request_irq(&pdev->dev,
@@ -1981,7 +1986,8 @@ int dsi_panel_device_register(struct device_node *pan_node,
 			pr_err("%s: Panel power on failed\n", __func__);
 			return rc;
 		}
-
+		if (ctrl_pdata->bklt_ctrl == BL_PWM)
+			ctrl_pdata->pwm_enabled = 1;
 		pinfo->blank_state = MDSS_PANEL_BLANK_UNBLANK;
 		mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 1);
 		ctrl_pdata->ctrl_state |=

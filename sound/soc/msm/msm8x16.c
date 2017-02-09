@@ -1495,6 +1495,11 @@ static void *def_msm8x16_wcd_mbhc_cal(void)
 	 * one for current source and another for Micbias.
 	 * all btn_low corresponds to threshold for current source
 	 * all bt_high corresponds to threshold for Micbias
+	 * Below thresholds are based on following resistances
+	 * 0-70    == Button 0
+	 * 110-180 == Button 1
+	 * 210-290 == Button 2
+	 * 360-680 == Button 3
 	 */
 	btn_low[0] = 87;
 	btn_high[0] = 87;
@@ -2063,6 +2068,22 @@ static struct snd_soc_dai_link msm8x16_dai[] = {
 		.ignore_pmdown_time = 1,
 		.codec_dai_name = "snd-soc-dummy-dai",
 		.codec_name = "snd-soc-dummy",
+	},
+	{ /* hw:x, 26 */
+		.name = "QCHAT",
+		.stream_name = "QCHAT",
+		.cpu_dai_name   = "QCHAT",
+		.platform_name  = "msm-pcm-voice",
+		.dynamic = 1,
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
+				SND_SOC_DPCM_TRIGGER_POST},
+		.no_host_mode = SND_SOC_DAI_LINK_NO_HOST,
+		.ignore_suspend = 1,
+		/* this dainlink has playback support */
+		.ignore_pmdown_time = 1,
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.codec_name = "snd-soc-dummy",
+		.be_id = MSM_FRONTEND_DAI_QCHAT,
 	},
 	/* Backend I2S DAI Links */
 	{
@@ -2680,7 +2701,7 @@ static int msm8x16_asoc_machine_probe(struct platform_device *pdev)
 	if (!pdata) {
 		dev_err(&pdev->dev, "Can't allocate msm8x16_asoc_mach_data\n");
 		ret = -ENOMEM;
-		goto err;
+		goto err1;
 	}
 
 	pdata->vaddr_gpio_mux_spkr_ctl =
@@ -2883,6 +2904,7 @@ err:
 	if (pdata->vaddr_gpio_mux_pcm_ctl)
 		iounmap(pdata->vaddr_gpio_mux_pcm_ctl);
 	devm_kfree(&pdev->dev, pdata);
+err1:
 	return ret;
 }
 

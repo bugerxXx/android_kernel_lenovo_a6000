@@ -23,6 +23,7 @@
 #include <linux/iommu.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/pm.h>
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
 #include <linux/module.h>
@@ -625,7 +626,7 @@ void mdp3_bus_bw_iommu_enable(int enable, int client)
 
 	if (enable) {
 		if (mdp3_res->allow_iommu_update)
-			mdp3_iommu_enable();
+			mdp3_iommu_enable(client);
 		if (ref_cnt == 1) {
 			ab = bus_handle->restore_ab[client];
 			ib = bus_handle->restore_ib[client];
@@ -634,7 +635,7 @@ void mdp3_bus_bw_iommu_enable(int enable, int client)
 	} else {
 		if (ref_cnt == 0)
 			mdp3_bus_scale_set_quota(client, 0, 0);
-		mdp3_iommu_disable();
+		mdp3_iommu_disable(client);
 	}
 
 	if (ref_cnt < 0) {
@@ -730,11 +731,9 @@ int mdp3_iommu_attach(int context)
 	if (context >= MDP3_IOMMU_CTX_MAX)
 		return -EINVAL;
 
-	mutex_lock(&mdp3_res->iommu_lock);
 	context_map = mdp3_res->iommu_contexts + context;
 	if (context_map->attached) {
 		pr_warn("mdp iommu already attached\n");
-		mutex_unlock(&mdp3_res->iommu_lock);
 		return 0;
 	}
 
@@ -747,7 +746,6 @@ int mdp3_iommu_attach(int context)
 	}
 
 	context_map->attached = true;
-	mutex_unlock(&mdp3_res->iommu_lock);
 	return 0;
 }
 
@@ -760,11 +758,9 @@ int mdp3_iommu_dettach(int context)
 		context >= MDP3_IOMMU_CTX_MAX)
 		return -EINVAL;
 
-	mutex_lock(&mdp3_res->iommu_lock);
 	context_map = mdp3_res->iommu_contexts + context;
 	if (!context_map->attached) {
 		pr_warn("mdp iommu not attached\n");
-		mutex_unlock(&mdp3_res->iommu_lock);
 		return 0;
 	}
 
@@ -772,7 +768,6 @@ int mdp3_iommu_dettach(int context)
 	iommu_detach_device(domain_map->domain, context_map->ctx);
 	context_map->attached = false;
 
-	mutex_unlock(&mdp3_res->iommu_lock);
 	return 0;
 }
 
@@ -924,13 +919,15 @@ static int mdp3_hw_init(void)
 	}
 	mdp3_res->intf[MDP3_DMA_OUTPUT_SEL_AHB].available = 0;
 	mdp3_res->intf[MDP3_DMA_OUTPUT_SEL_LCDC].available = 0;
-	mdp3_res->smart_blit_en = true;
+	mdp3_res->smart_blit_en = SMART_BLIT_RGB_EN | SMART_BLIT_YUV_EN;
+	mdp3_res->solid_fill_vote_en = false;
 	return 0;
 }
 
 int mdp3_dynamic_clock_gating_ctrl(int enable)
 {
 	int rc = 0;
+	int cgc_cfg = 0;
 	/*Disable dynamic auto clock gating*/
 	rc = mdp3_clk_update(MDP3_CLK_AHB, 1);
 	rc |= mdp3_clk_update(MDP3_CLK_AXI, 1);
@@ -939,12 +936,16 @@ int mdp3_dynamic_clock_gating_ctrl(int enable)
 		pr_err("fail to turn on MDP core clks\n");
 		return rc;
 	}
-
+	cgc_cfg = MDP3_REG_READ(MDP3_REG_CGC_EN);
 	if (enable) {
-		MDP3_REG_WRITE(MDP3_REG_CGC_EN, 0x7FFFF);
+		cgc_cfg |= (BIT(10));
+		cgc_cfg |= (BIT(18));
+		MDP3_REG_WRITE(MDP3_REG_CGC_EN, cgc_cfg);
 		VBIF_REG_WRITE(MDP3_VBIF_REG_FORCE_EN, 0x0);
 	} else {
-		MDP3_REG_WRITE(MDP3_REG_CGC_EN, 0x3FFFF);
+		cgc_cfg &= ~(BIT(10));
+		cgc_cfg &= ~(BIT(18));
+		MDP3_REG_WRITE(MDP3_REG_CGC_EN, cgc_cfg);
 		VBIF_REG_WRITE(MDP3_VBIF_REG_FORCE_EN, 0x3);
 	}
 
@@ -1031,10 +1032,16 @@ static int mdp3_res_init(void)
 static void mdp3_res_deinit(void)
 {
 	struct mdss_hw *mdp3_hw;
+	int i;
 
 	mdp3_hw = &mdp3_res->mdp3_hw;
 	mdp3_bus_scale_unregister();
-	mdp3_iommu_dettach(MDP3_IOMMU_CTX_MDP_0);
+
+	mutex_lock(&mdp3_res->iommu_lock);
+	for (i = 0; i < MDP3_IOMMU_CTX_MAX; i++)
+		mdp3_iommu_dettach(i);
+	mutex_unlock(&mdp3_res->iommu_lock);
+
 	mdp3_iommu_deinit();
 
 	if (!IS_ERR_OR_NULL(mdp3_res->ion_client))
@@ -1773,11 +1780,16 @@ done:
 	return ret;
 }
 
-int mdp3_iommu_enable()
+int mdp3_iommu_enable(int client)
 {
-	int i, rc = 0;
+	int i, rc = 0, ref_cnt = 0;
 
-	if (mdp3_res->iommu_ref_cnt == 0) {
+	mutex_lock(&mdp3_res->iommu_lock);
+	for (i = 0; i < MDP3_CLIENT_MAX; i++)
+		ref_cnt += mdp3_res->iommu_ref_cnt[i];
+
+	if (ref_cnt == 0) {
+		mdp3_bus_scale_set_quota(MDP3_CLIENT_IOMMU, SZ_1M, SZ_1M);
 		for (i = 0; i < MDP3_IOMMU_CTX_MAX; i++) {
 			rc = mdp3_iommu_attach(i);
 			if (rc) {
@@ -1789,24 +1801,36 @@ int mdp3_iommu_enable()
 	}
 
 	if (!rc)
-		mdp3_res->iommu_ref_cnt++;
+		mdp3_res->iommu_ref_cnt[client]++;
+	mutex_unlock(&mdp3_res->iommu_lock);
 
+	pr_debug("client :%d client_ref_cnt: %d total_ref_cnt: %d\n",
+		client, mdp3_res->iommu_ref_cnt[client], ref_cnt);
 	return rc;
 }
 
-int mdp3_iommu_disable()
+int mdp3_iommu_disable(int client)
 {
-	int i, rc = 0;
+	int i, rc = 0, ref_cnt = 0;
 
-	if (mdp3_res->iommu_ref_cnt) {
-		mdp3_res->iommu_ref_cnt--;
-		if (mdp3_res->iommu_ref_cnt == 0) {
+	mutex_lock(&mdp3_res->iommu_lock);
+	if (mdp3_res->iommu_ref_cnt[client]) {
+		mdp3_res->iommu_ref_cnt[client]--;
+
+		for (i = 0; i < MDP3_CLIENT_MAX; i++)
+			ref_cnt += mdp3_res->iommu_ref_cnt[i];
+
+		pr_debug("client :%d client_ref_cnt: %d total_ref_cnt: %d\n",
+			client, mdp3_res->iommu_ref_cnt[client], ref_cnt);
+		if (ref_cnt == 0) {
 			for (i = 0; i < MDP3_IOMMU_CTX_MAX; i++)
 				rc = mdp3_iommu_dettach(i);
+			mdp3_bus_scale_set_quota(MDP3_CLIENT_IOMMU, 0, 0);
 		}
 	} else {
-		pr_err("iommu ref count unbalanced\n");
+		pr_err("iommu ref count unbalanced for client %d\n", client);
 	}
+	mutex_unlock(&mdp3_res->iommu_lock);
 
 	return rc;
 }
@@ -1819,9 +1843,9 @@ int mdp3_iommu_ctrl(int enable)
 		return 0;
 
 	if (enable)
-		rc = mdp3_iommu_enable();
+		rc = mdp3_iommu_enable(MDP3_CLIENT_DSI);
 	else
-		rc = mdp3_iommu_disable();
+		rc = mdp3_iommu_disable(MDP3_CLIENT_DSI);
 	return rc;
 }
 
@@ -1971,6 +1995,14 @@ static int mdp3_alloc(struct msm_fb_data_type *mfd)
 		pr_err("fail to map to IOMMU %d\n", ret);
 		return ret;
 	}
+	ret = iommu_map(mdp3_res->domains[MDP3_IOMMU_DOMAIN_UNSECURE].domain,
+			phys, phys, size, IOMMU_READ);
+
+	if (ret) {
+		pr_err("fail to map phy addr to IOMMU %d\n", ret);
+		return ret;
+	}
+
 	pr_info("allocating %u bytes at %p (%lx phys) for fb %d\n",
 		size, virt, phys, mfd->index);
 
@@ -1983,6 +2015,7 @@ void mdp3_free(struct msm_fb_data_type *mfd)
 {
 	size_t size = 0;
 	int dom;
+	unsigned long phys;
 
 	if (!mfd->iova || !mfd->fbi->screen_base) {
 		pr_info("no fbmem allocated\n");
@@ -1990,12 +2023,14 @@ void mdp3_free(struct msm_fb_data_type *mfd)
 	}
 
 	size = mfd->fbi->fix.smem_len;
+	phys = mfd->fbi->fix.smem_start;
 	dom = mdp3_res->domains[MDP3_IOMMU_DOMAIN_UNSECURE].domain_idx;
+	iommu_unmap(mdp3_res->domains[MDP3_IOMMU_DOMAIN_UNSECURE].domain,
+			phys, size);
 	msm_iommu_unmap_contig_buffer(mfd->iova, dom, 0, size);
 
 	mfd->fbi->screen_base = NULL;
 	mfd->fbi->fix.smem_start = 0;
-	mfd->fbi->fix.smem_len = 0;
 	mfd->iova = 0;
 }
 
@@ -2240,6 +2275,7 @@ static void mdp3_dma_underrun_intr_handler(int type, void *arg)
 	mdp3_res->underrun_cnt++;
 	pr_err("display underrun detected count=%d\n",
 			mdp3_res->underrun_cnt);
+	ATRACE_INT("mdp3_dma_underrun_intr_handler", mdp3_res->underrun_cnt);
 }
 
 static ssize_t mdp3_show_capabilities(struct device *dev,
@@ -2271,9 +2307,12 @@ static ssize_t mdp3_store_smart_blit(struct device *dev,
 		pr_err("kstrtoint failed. rc=%d\n", rc);
 		return rc;
 	} else {
-		mdp3_res->smart_blit_en = data ? true : false;
-		pr_debug("mdp3 smart blit %s\n",
-			 mdp3_res->smart_blit_en ? "ENABLED" : "DISABLED");
+		mdp3_res->smart_blit_en = data;
+		pr_debug("mdp3 smart blit RGB %s YUV %s\n",
+			(mdp3_res->smart_blit_en & SMART_BLIT_RGB_EN) ?
+			"ENABLED" : "DISABLED",
+			(mdp3_res->smart_blit_en & SMART_BLIT_YUV_EN) ?
+			"ENABLED" : "DISABLED");
 	}
 	return len;
 }
@@ -2282,8 +2321,12 @@ static ssize_t mdp3_show_smart_blit(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	ssize_t ret = 0;
-	pr_debug("mdp3 smart blit %s\n",
-		mdp3_res->smart_blit_en ? "ENABLED" : "DISABLED");
+
+	pr_debug("mdp3 smart blit RGB %s YUV %s\n",
+		(mdp3_res->smart_blit_en & SMART_BLIT_RGB_EN) ?
+		"ENABLED" : "DISABLED",
+		(mdp3_res->smart_blit_en & SMART_BLIT_YUV_EN) ?
+		"ENABLED" : "DISABLED");
 	ret = snprintf(buf, PAGE_SIZE, "%d\n", mdp3_res->smart_blit_en);
 	return ret;
 }
@@ -2523,11 +2566,6 @@ static int mdp3_probe(struct platform_device *pdev)
 		pr_err("unable to get mdss gdsc regulator\n");
 		return -EINVAL;
 	}
-	rc = mdp3_footswitch_ctrl(1);
-	if (rc) {
-		pr_err("unable to turn on FS\n");
-		goto probe_done;
-	}
 
 	rc = mdp3_check_version();
 	if (rc) {
@@ -2540,6 +2578,10 @@ static int mdp3_probe(struct platform_device *pdev)
 		pr_err("unable to initialize mdp debugging\n");
 		goto probe_done;
 	}
+
+	/* Enable PM runtime */
+	pm_runtime_set_suspended(&pdev->dev);
+	pm_runtime_enable(&pdev->dev);
 
 	rc = mdp3_register_sysfs(pdev);
 	if (rc)
@@ -2554,6 +2596,12 @@ static int mdp3_probe(struct platform_device *pdev)
 	if (rc)
 		pr_err("unable to configure interrupt callback\n");
 	mdp3_res->mdss_util->mdp_probe_done = true;
+
+	/*
+	 * Keep a reference to the runtime pm till device is turned
+	 * off, where this reference will be released.
+	 */
+	pm_runtime_get_sync(&pdev->dev);
 
 probe_done:
 	if (IS_ERR_VALUE(rc))
@@ -2590,41 +2638,100 @@ int mdp3_panel_get_boot_cfg(void)
 	return rc;
 }
 
-static  int mdp3_suspend_sub(struct mdp3_hw_resource *mdata)
+static  int mdp3_suspend_sub(void)
 {
 	mdp3_enable_regulator(false);
 	return 0;
 }
 
-static  int mdp3_resume_sub(struct mdp3_hw_resource *mdata)
+static  int mdp3_resume_sub(void)
 {
 	mdp3_enable_regulator(true);
 	return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
+static int mdp3_pm_suspend(struct device *dev)
+{
+	dev_dbg(dev, "Display pm suspend\n");
+
+	return mdp3_suspend_sub();
+}
+
+static int mdp3_pm_resume(struct device *dev)
+{
+	dev_dbg(dev, "Display pm resume\n");
+
+	/*
+	 * It is possible that the runtime status of the mdp device may
+	 * have been active when the system was suspended. Reset the runtime
+	 * status to suspended state after a complete system resume.
+	 */
+	pm_runtime_disable(dev);
+	pm_runtime_set_suspended(dev);
+	pm_runtime_enable(dev);
+
+	return mdp3_resume_sub();
+}
+#endif
+
+#if defined(CONFIG_PM) && !defined(CONFIG_PM_SLEEP)
 static int mdp3_suspend(struct platform_device *pdev, pm_message_t state)
 {
-	struct mdp3_hw_resource *mdata = platform_get_drvdata(pdev);
+	pr_debug("Display suspend\n");
 
-	if (!mdata)
-		return -ENODEV;
-
-	pr_debug("display suspend\n");
-
-	return mdp3_suspend_sub(mdata);
+	return mdp3_suspend_sub();
 }
 
 static int mdp3_resume(struct platform_device *pdev)
 {
-	struct mdp3_hw_resource *mdata = platform_get_drvdata(pdev);
+	pr_debug("Display resume\n");
 
-	if (!mdata)
-		return -ENODEV;
-
-	pr_debug("display resume\n");
-
-	return mdp3_resume_sub(mdata);
+	return mdp3_resume_sub();
 }
+#else
+#define mdp3_suspend NULL
+#define mdp3_resume  NULL
+#endif
+
+
+#ifdef CONFIG_PM_RUNTIME
+static int mdp3_runtime_resume(struct device *dev)
+{
+	dev_dbg(dev, "Display pm runtime resume\n");
+
+	mdp3_enable_regulator(true);
+	mdp3_footswitch_ctrl(1);
+
+	return 0;
+}
+
+static int mdp3_runtime_idle(struct device *dev)
+{
+	dev_dbg(dev, "Display pm runtime idle\n");
+
+	return 0;
+}
+
+static int mdp3_runtime_suspend(struct device *dev)
+{
+	dev_dbg(dev, "Display pm runtime suspend\n");
+
+	mdp3_enable_regulator(false);
+	mdp3_footswitch_ctrl(0);
+
+	return 0;
+}
+#endif
+
+static const struct dev_pm_ops mdp3_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(mdp3_pm_suspend,
+				mdp3_pm_resume)
+	SET_RUNTIME_PM_OPS(mdp3_runtime_suspend,
+				mdp3_runtime_resume,
+				mdp3_runtime_idle)
+};
+
 
 static int mdp3_remove(struct platform_device *pdev)
 {
@@ -2647,14 +2754,15 @@ MODULE_DEVICE_TABLE(of, mdp3_dt_match);
 EXPORT_COMPAT("qcom,mdss_mdp3");
 
 static struct platform_driver mdp3_driver = {
-	.probe = mdp3_probe,
-	.remove = mdp3_remove,
-	.suspend = mdp3_suspend,
-	.resume = mdp3_resume,
+	.probe    = mdp3_probe,
+	.remove   = mdp3_remove,
+	.suspend  = mdp3_suspend,
+	.resume   = mdp3_resume,
 	.shutdown = NULL,
 	.driver = {
-		.name = "mdp3",
+		.name           = "mdp3",
 		.of_match_table = mdp3_dt_match,
+		.pm             = &mdp3_pm_ops,
 	},
 };
 

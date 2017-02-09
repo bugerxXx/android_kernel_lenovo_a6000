@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2008-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -609,13 +609,12 @@ EXPORT_SYMBOL(kgsl_context_init);
  * detached by checking the KGSL_CONTEXT_PRIV_DETACHED bit in
  * context->priv.
  */
-int kgsl_context_detach(struct kgsl_context *context)
+static void kgsl_context_detach(struct kgsl_context *context)
 {
-	int ret;
 	struct kgsl_device *device;
 
 	if (context == NULL)
-		return -EINVAL;
+		return;
 
 	/*
 	 * Mark the context as detached to keep others from using
@@ -623,7 +622,7 @@ int kgsl_context_detach(struct kgsl_context *context)
 	 * we don't try to detach twice.
 	 */
 	if (test_and_set_bit(KGSL_CONTEXT_PRIV_DETACHED, &context->priv))
-		return -EINVAL;
+		return;
 
 	device = context->device;
 
@@ -631,7 +630,7 @@ int kgsl_context_detach(struct kgsl_context *context)
 
 	/* we need to hold device mutex to detach */
 	mutex_lock(&device->mutex);
-	ret = context->device->ftbl->drawctxt_detach(context);
+	context->device->ftbl->drawctxt_detach(context);
 	mutex_unlock(&device->mutex);
 
 	/*
@@ -645,8 +644,6 @@ int kgsl_context_detach(struct kgsl_context *context)
 	kgsl_del_event_group(&context->events);
 
 	kgsl_context_put(context);
-
-	return ret;
 }
 
 void
@@ -996,6 +993,8 @@ static void kgsl_process_private_close(struct kgsl_device_private *dev_priv,
 	debugfs_remove_recursive(private->debug_root);
 
 	process_release_sync_sources(private);
+
+	kgsl_mmu_detach_pagetable(private->pagetable);
 
 	/* Remove the process struct from the master list */
 	list_del(&private->list);
@@ -1594,11 +1593,16 @@ static void _kgsl_cmdbatch_timer(unsigned long data)
 	struct kgsl_device *device;
 	struct kgsl_cmdbatch *cmdbatch = (struct kgsl_cmdbatch *) data;
 	struct kgsl_cmdbatch_sync_event *event;
+	struct adreno_context *drawctxt;
 
 	if (cmdbatch == NULL || cmdbatch->context == NULL)
 		return;
 
+	drawctxt = ADRENO_CONTEXT(cmdbatch->context);
 	/* We are in timer context, this can be non-bh */
+	spin_lock(&drawctxt->lock);
+	set_bit(ADRENO_CONTEXT_CMDBATCH_FLAG_FENCE_LOG,
+		&drawctxt->flags);
 	spin_lock(&cmdbatch->lock);
 	if (list_empty(&cmdbatch->synclist))
 		goto done;
@@ -1640,6 +1644,9 @@ static void _kgsl_cmdbatch_timer(unsigned long data)
 
 done:
 	spin_unlock(&cmdbatch->lock);
+	clear_bit(ADRENO_CONTEXT_CMDBATCH_FLAG_FENCE_LOG,
+		&drawctxt->flags);
+	spin_unlock(&drawctxt->lock);
 }
 
 /**
@@ -2602,14 +2609,15 @@ long kgsl_ioctl_drawctxt_destroy(struct kgsl_device_private *dev_priv,
 {
 	struct kgsl_drawctxt_destroy *param = data;
 	struct kgsl_context *context;
-	long result;
 
 	context = kgsl_context_get_owner(dev_priv, param->drawctxt_id);
+	if (context == NULL)
+		return -EINVAL;
 
-	result = kgsl_context_detach(context);
-
+	kgsl_context_detach(context);
 	kgsl_context_put(context);
-	return result;
+
+	return 0;
 }
 
 static long _sharedmem_free_entry(struct kgsl_mem_entry *entry)

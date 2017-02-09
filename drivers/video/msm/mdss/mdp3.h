@@ -25,14 +25,19 @@
 #include "mdss_fb.h"
 #include "mdss.h"
 
-#define MDP_VSYNC_CLK_RATE	19200000
-#define MDP_CORE_CLK_RATE_SVS	150000000
-#define MDP_CORE_CLK_RATE_MAX	307200000
+#define MDP_VSYNC_CLK_RATE			19200000
+#define MDP_CORE_CLK_RATE_WEARABLE_NOM		50000000
+#define MDP_CORE_CLK_RATE_WEARABLE_SVS		80000000
+#define MDP_CORE_CLK_RATE_WEARABLE_SUPER_SVS	100000000
+#define MDP_CORE_CLK_RATE_SVS			160000000
+#define MDP_CORE_CLK_RATE_SUPER_SVS		200000000
+#define MDP_CORE_CLK_RATE_MAX			307200000
 
 /* PPP cant work at SVS for panel res above qHD */
 #define SVS_MAX_PIXEL		(540 * 960)
 
 #define KOFF_TIMEOUT msecs_to_jiffies(84)
+#define WAIT_DMA_TIMEOUT msecs_to_jiffies(84)
 
 enum  {
 	MDP3_CLK_AHB,
@@ -67,6 +72,7 @@ enum {
 	MDP3_CLIENT_DMA_P,
 	MDP3_CLIENT_DSI = 1,
 	MDP3_CLIENT_PPP,
+	MDP3_CLIENT_IOMMU,
 	MDP3_CLIENT_MAX,
 };
 
@@ -126,6 +132,9 @@ struct mdp3_intr_cb {
 	void *data;
 };
 
+#define SMART_BLIT_RGB_EN	1
+#define SMART_BLIT_YUV_EN	2
+
 struct mdp3_hw_resource {
 	struct platform_device *pdev;
 	u32 mdp_rev;
@@ -150,7 +159,7 @@ struct mdp3_hw_resource {
 	struct ion_client *ion_client;
 	struct mdp3_iommu_domain_map *domains;
 	struct mdp3_iommu_ctx_map *iommu_contexts;
-	unsigned int iommu_ref_cnt;
+	unsigned int iommu_ref_cnt[MDP3_CLIENT_MAX];
 	bool allow_iommu_update;
 	struct ion_handle *ion_handle;
 	struct mutex iommu_lock;
@@ -180,7 +189,8 @@ struct mdp3_hw_resource {
 	struct regulator *vdd_cx;
 	struct regulator *fs;
 	bool fs_ena;
-	bool smart_blit_en;
+	u8 smart_blit_en;
+	bool solid_fill_vote_en;
 };
 
 struct mdp3_img_data {
@@ -209,8 +219,8 @@ int mdp3_res_update(int enable, int dsi_clk, int client);
 int mdp3_bus_scale_set_quota(int client, u64 ab_quota, u64 ib_quota);
 int mdp3_put_img(struct mdp3_img_data *data, int client);
 int mdp3_get_img(struct msmfb_data *img, struct mdp3_img_data *data, int client);
-int mdp3_iommu_enable(void);
-int mdp3_iommu_disable(void);
+int mdp3_iommu_enable(int client);
+int mdp3_iommu_disable(int client);
 int mdp3_iommu_is_attached(void);
 void mdp3_free(struct msm_fb_data_type *mfd);
 int mdp3_parse_dt_splash(struct msm_fb_data_type *mfd);
