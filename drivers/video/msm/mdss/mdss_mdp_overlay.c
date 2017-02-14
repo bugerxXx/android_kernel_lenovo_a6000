@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1968,27 +1968,35 @@ static void mdss_mdp_overlay_pan_display(struct msm_fb_data_type *mfd)
 		goto pan_display_error;
 	}
 
-	ret = mdss_mdp_overlay_get_fb_pipe(mfd, &pipe,
-					MDSS_MDP_MIXER_MUX_LEFT);
+	//+BUG,mahao.wt,MOD,2015.6.17,Resolve blue screen flicker in poweroff charging mode
+	 ret = mdss_mdp_overlay_get_fb_pipe(mfd, &pipe, MDSS_MDP_MIXER_MUX_LEFT);
+	//-BUG,mahao.wt,MOD,2015.6.17,Resolve blue screen flicker in poweroff charging mode
 	if (ret) {
-		pr_err("unable to allocate base pipe\n");
+		pr_err("unable to allocate base pipe\n");//BUG,mahao.wt,MOD,2015.6.17,Resolve blue screen flicker in poweroff charging mode
 		goto pan_display_error;
 	}
 
-	if (mdss_mdp_pipe_map(pipe)) {
-		pr_err("unable to map base pipe\n");
+	//+BUG,mahao.wt,MOD,2015.6.17,Resolve blue screen flicker in poweroff charging mode
+
+	 if (mdss_mdp_pipe_map(pipe)) {
+                pr_err("unable to map base pipe\n");	
+        //-BUG,mahao.wt,MOD,2015.6.17,Resolve blue screen flicker in poweroff charging mode				
 		goto pan_display_error;
 	}
 
+	//+BUG,mahao.wt,MOD,2015.6.17,Resolve blue screen flicker in poweroff charging mode
 	ret = mdss_mdp_overlay_start(mfd);
-	if (ret) {
-		pr_err("unable to start overlay %d (%d)\n", mfd->index, ret);
+	//-BUG,mahao.wt,MOD,2015.6.17,Resolve blue screen flicker in poweroff charging mode
+      if (ret) {
+		pr_err("unable to start overlay %d (%d)\n", mfd->index, ret);//BUG,mahao.wt,MOD,2015.6.17,Resolve blue screen flicker in poweroff charging mode
 		goto pan_display_error;
 	}
 
-	ret = mdss_iommu_ctrl(1);
-	if (IS_ERR_VALUE(ret)) {
-		pr_err("IOMMU attach failed\n");
+//+BUG,mahao.wt,MOD,2015.6.17,Resolve blue screen flicker in poweroff charging mode
+     ret = mdss_iommu_ctrl(1);
+     if (IS_ERR_VALUE(ret)) {
+                pr_err("IOMMU attach failed\n");	
+//-BUG,mahao.wt,MOD,2015.6.17,Resolve blue screen flicker in poweroff charging mode				
 		goto pan_display_error;
 	}
 
@@ -3687,8 +3695,14 @@ static int mdss_mdp_overlay_off(struct msm_fb_data_type *mfd)
 		return -ENODEV;
 	}
 
-	if (!mdss_mdp_ctl_is_power_on(mdp5_data->ctl))
+	if (!mdss_mdp_ctl_is_power_on(mdp5_data->ctl)) {
+		if (mfd->panel_reconfig) {
+			mdp5_data->borderfill_enable = false;
+			mdss_mdp_ctl_destroy(mdp5_data->ctl);
+			mdp5_data->ctl = NULL;
+		}
 		return 0;
+	}
 
 	/*
 	 * Keep a reference to the runtime pm until the overlay is turned

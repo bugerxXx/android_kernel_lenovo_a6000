@@ -19,7 +19,7 @@
 #include <linux/mutex.h>
 
 #include "mdss_mdp.h"
-#include <trace/mdss_mdp_trace.h>
+#include "mdss_mdp_trace.h"
 
 #define SMP_MB_SIZE		(mdss_res->smp_mb_size)
 #define SMP_MB_CNT		(mdss_res->smp_mb_cnt)
@@ -479,7 +479,7 @@ static u32 mdss_mdp_calc_per_plane_num_blks(u32 ystride,
 		if (pipe->src_fmt->tile)
 			nlines = 8;
 		else
-			nlines = pipe->bwc_mode ? 1 : 2;
+			nlines = pipe->bwc_mode ? 1 : 3;
 
 		num_blks = DIV_ROUND_UP(ystride * nlines,
 				SMP_MB_SIZE);

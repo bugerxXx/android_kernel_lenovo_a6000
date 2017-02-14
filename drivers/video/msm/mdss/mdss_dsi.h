@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -98,9 +98,6 @@ enum dsi_panel_status_mode {
 	ESD_REG,
 	ESD_REG_NT35596,
 	ESD_TE,
-#ifdef CONFIG_MACH_YULONG
-	ESD_REG_YL,
-#endif
 	ESD_MAX,
 };
 
@@ -126,7 +123,8 @@ enum dsi_pm_type {
 	DSI_PANEL_PM,
 	DSI_MAX_PM
 };
-
+#define STATUS_CMDS_NUM 5
+#define STATUS_VALUE_NUM 5
 #define CTRL_STATE_UNKNOWN		0x00
 #define CTRL_STATE_PANEL_INIT		BIT(0)
 #define CTRL_STATE_MDP_ACTIVE		BIT(1)
@@ -183,7 +181,6 @@ enum dsi_pm_type {
 
 #define DSI_DATA_LANES_STOP_STATE	0xF
 #define DSI_CLK_LANE_STOP_STATE		BIT(4)
-#define DSI_DATA_LANES_ENABLED		0xF0
 
 /* offsets for dynamic refresh */
 #define DSI_DYNAMIC_REFRESH_CTRL		0x200
@@ -245,19 +242,6 @@ struct dsi_panel_cmds {
 	int link_state;
 };
 
-#ifdef CONFIG_MACH_YULONG
-struct status_reg {
-	u8 reg;
-	u8 num_vals;
-	u8 *vals;
-};
-
-struct dsi_panel_status_regs {
-	size_t num_regs;
-	struct status_reg *regs;
-};
-#endif
-
 struct dsi_kickoff_action {
 	struct list_head act_entry;
 	void (*action) (void *);
@@ -301,7 +285,6 @@ enum {
 #define DSI_EV_MDP_FIFO_UNDERFLOW	0x0002
 #define DSI_EV_DSI_FIFO_EMPTY		0x0004
 #define DSI_EV_DLNx_FIFO_OVERFLOW	0x0008
-#define DSI_EV_LP_RX_TIMEOUT		0x0010
 #define DSI_EV_STOP_HS_CLK_LANE		0x40000000
 #define DSI_EV_MDP_BUSY_RELEASE		0x80000000
 
@@ -368,6 +351,7 @@ struct mdss_dsi_ctrl_pdata {
 	struct dsi_drv_cm_data shared_pdata;
 	u32 pclk_rate;
 	u32 byte_clk_rate;
+	bool refresh_clk_rate; /* flag to recalculate clk_rate */
 	struct dss_module_power power_data[DSI_MAX_PM];
 	u32 dsi_irq_mask;
 	struct mdss_hw *dsi_hw;
@@ -375,24 +359,10 @@ struct mdss_dsi_ctrl_pdata {
 
 	struct dsi_panel_cmds on_cmds;
 	struct dsi_panel_cmds off_cmds;
-
-#ifdef CONFIG_MACH_YULONG
-	struct dsi_panel_cmds ce_cmds;
-	struct dsi_panel_cmds ce_off_cmds;
-	struct dsi_panel_cmds ce_level1_cmds;
-	struct dsi_panel_cmds ce_level2_cmds;
-	struct dsi_panel_cmds ce_level3_cmds;
-	struct dsi_panel_cmds ce_level4_cmds;
-	struct dsi_panel_cmds cabc_ui_cmds;
-	struct dsi_panel_cmds cabc_still_cmds;
-	struct dsi_panel_cmds cabc_moving_cmds;
-	struct dsi_panel_cmds cabc_off_cmds;
-	struct dsi_panel_status_regs status_regs;
-#endif
-
-	struct dsi_panel_cmds status_cmds;
+	struct dsi_panel_cmds status_cmds[STATUS_CMDS_NUM];
+	int status_cmds_num;
 	u32 status_cmds_rlen;
-	u32 status_value;
+	u32 status_value[STATUS_CMDS_NUM][STATUS_VALUE_NUM];
 	u32 status_error_count;
 
 	struct dsi_panel_cmds video2cmd;
@@ -422,6 +392,7 @@ struct mdss_dsi_ctrl_pdata {
 	struct dsi_buf rx_buf;
 	struct dsi_buf status_buf;
 	int status_mode;
+	int rx_len;
 
 	struct dsi_pinctrl_res pin_res;
 
@@ -504,6 +475,8 @@ bool __mdss_dsi_clk_enabled(struct mdss_dsi_ctrl_pdata *ctrl, u8 clk_type);
 void mdss_dsi_ctrl_setup(struct mdss_dsi_ctrl_pdata *ctrl);
 void mdss_dsi_dln0_phy_err(struct mdss_dsi_ctrl_pdata *ctrl);
 void mdss_dsi_lp_cd_rx(struct mdss_dsi_ctrl_pdata *ctrl);
+u32 mdss_dsi_panel_cmd_read(struct mdss_dsi_ctrl_pdata *ctrl, char cmd0,
+		char cmd1, void (*fxn)(int), char *rbuf, int len);
 void mdss_dsi_get_hw_revision(struct mdss_dsi_ctrl_pdata *ctrl);
 
 int mdss_dsi_panel_init(struct device_node *node,
